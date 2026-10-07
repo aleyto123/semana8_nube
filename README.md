@@ -162,7 +162,7 @@ Proyecto académico para ejecución local o Vercel. El servidor local escucha en
 
 ## Desplegar en Vercel
 
-1. Importa este repositorio o vuelve a desplegar el proyecto existente después del último commit. La raíz debe ser la carpeta que contiene `vercel.json`; selecciona **Flask** como framework. La configuración del repositorio define la entrada `vercel_app:app` y sirve tanto las páginas como la API.
+1. Importa este repositorio o vuelve a desplegar el proyecto existente después del último commit. La raíz debe ser la carpeta que contiene `vercel.json`. La configuración declara explícitamente la función Python `api/index.py`, que exporta la aplicación Flask de `vercel_app.py`, y dirige a ella las páginas y la API. Funciona también en el proyecto existente que antes desplegaba solo archivos estáticos.
 2. Conecta una base **PostgreSQL** desde Storage/Marketplace, por ejemplo Neon. Habilita su conexión para Production y Preview. El backend acepta la variable `DATABASE_URL` o `POSTGRES_URL` generada por la integración. No uses SQLite en `/tmp`: perdería usuarios y productos entre instancias.
 3. En Settings → Environment Variables configura `JWT_SECRET` con un valor aleatorio de al menos 32 caracteres y `BASE_URL=https://semana8nube.vercel.app` (o tu dominio). Para generar la clave en tu equipo: `python -c "import secrets; print(secrets.token_hex(32))"`. Conserva la misma clave entre despliegues; no la publiques.
 4. Si necesitas administrador, configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes del primer acceso. La contraseña debe cumplir las reglas del registro. Una cuenta que ya existe no se convierte automáticamente en administrador.

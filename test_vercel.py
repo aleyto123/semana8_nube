@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import app as backend
-from vercel_app import app
+from api.index import app
 
 class VercelTests(unittest.TestCase):
     def setUp(self):
