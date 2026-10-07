@@ -1,13 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "flask",
-  "buildCommand": "",
-  "outputDirectory": "",
-  "functions": {
-    "vercel_app.py": {
-      "maxDuration": 60,
-      "includeFiles": "{index.html,styles.css,app.js,screens.js,data.js,favicon.svg}",
-      "excludeFiles": "{test_*.py,__pycache__/**,*.db,*.db-*,.jwt-secret,.env,.env.*,README.md}"
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": ["app.py", "storage.py", "vercel_app.py", "index.html", "styles.css", "app.js", "screens.js", "data.js", "favicon.svg"]
+      }
     }
-  }
+  ],
+  "routes": [{"src": "/(.*)", "dest": "/api/index.py"}]
 }
