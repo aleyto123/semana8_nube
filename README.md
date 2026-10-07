@@ -5,11 +5,11 @@ Aplicación web para gestionar inventario de productos tecnológicos por tienda,
 ## Tecnologías
 
 - **Frontend:** HTML, CSS y JavaScript modular.
-- **Servidor:** Python 3.10 o superior, usando su biblioteca estándar.
-- **Persistencia:** SQLite.
+- **Servidor:** Python; biblioteca estándar en local y Flask en Vercel (Python 3.12 o superior).
+- **Persistencia:** SQLite en local y PostgreSQL en Vercel.
 - **Autenticación:** contraseñas derivadas con scrypt, JWT firmado y MFA con TOTP.
 
-No requiere instalar paquetes ni compilar el frontend. La tipografía Manrope se carga desde Google Fonts; si no hay conexión, se utiliza una fuente del sistema.
+La ejecución local con SQLite no requiere paquetes adicionales ni compilar el frontend. Para Vercel se instalan las dependencias de `requirements.txt`. La tipografía Manrope se carga desde Google Fonts; si no hay conexión, se utiliza una fuente del sistema.
 
 ## Inicio rápido
 
@@ -158,7 +158,30 @@ El `.gitignore` excluye credenciales, bases de datos, entornos virtuales, caché
 
 ## Alcance
 
-Proyecto académico para ejecución local. El servidor escucha en `127.0.0.1`. Un despliegue público requiere adaptar el servidor y la gestión de secretos, usar HTTPS y completar los servicios que actualmente están disponibles solo en demostración.
+Proyecto académico para ejecución local o Vercel. El servidor local escucha en `127.0.0.1`. Vercel utiliza `vercel_app.py`, conserva los datos en PostgreSQL y necesita las variables indicadas abajo. Los módulos disponibles solo en demostración conservan ese alcance.
+
+## Desplegar en Vercel
+
+1. Importa este repositorio o vuelve a desplegar el proyecto existente después del último commit. La raíz debe ser la carpeta que contiene `vercel.json`; selecciona **Flask** como framework. La configuración del repositorio define la entrada `vercel_app:app` y sirve tanto las páginas como la API.
+2. Conecta una base **PostgreSQL** desde Storage/Marketplace, por ejemplo Neon. Habilita su conexión para Production y Preview. El backend acepta la variable `DATABASE_URL` o `POSTGRES_URL` generada por la integración. No uses SQLite en `/tmp`: perdería usuarios y productos entre instancias.
+3. En Settings → Environment Variables configura `JWT_SECRET` con un valor aleatorio de al menos 32 caracteres y `BASE_URL=https://semana8nube.vercel.app` (o tu dominio). Para generar la clave en tu equipo: `python -c "import secrets; print(secrets.token_hex(32))"`. Conserva la misma clave entre despliegues; no la publiques.
+4. Si necesitas administrador, configura `ADMIN_EMAIL` y `ADMIN_PASSWORD` antes del primer acceso. La contraseña debe cumplir las reglas del registro. Una cuenta que ya existe no se convierte automáticamente en administrador.
+5. Haz **Redeploy** después de conectar la base y guardar las variables. La primera petición a la API crea las tablas y los productos iniciales sin borrar registros existentes.
+6. Comprueba `/api/health`: debe devolver `{"status":"ok","storage":"postgresql"}`. Abre `/register`, crea una cuenta, inicia sesión y completa MFA. Cambiar de despliegue debe conservar la cuenta y el inventario.
+
+Google y GitHub requieren sus propias aplicaciones OAuth, con `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` y `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET`. Los callbacks son `https://semana8nube.vercel.app/auth/google/callback` y `https://semana8nube.vercel.app/auth/github/callback`. Un token personal para subir a GitHub no sustituye estas credenciales. El registro e inicio de sesión con contraseña no dependen de OAuth.
+
+`.env.example` documenta las variables; no contiene credenciales. La base local no se copia automáticamente a PostgreSQL: las cuentas locales deben volver a registrarse en la nueva base.
+
+### Verificar la entrada de Vercel localmente
+
+```powershell
+python -m pip install -r requirements.txt
+python -m unittest -v test_app test_vercel
+python -m flask --app vercel_app run --port 8001
+```
+
+Las ocho pruebas verifican permisos, bloqueo, MFA, rutas directas, registro y conservación de datos entre clientes WSGI. Estas pruebas usan SQLite aislado; la conexión PostgreSQL desplegada se verifica con `/api/health` y un acceso real después de configurar Vercel.
 
 ## Conclusiones
 

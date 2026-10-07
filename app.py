@@ -1,27 +1,46 @@
-"""TechStore: laboratorio ejecutable con Python 3.10+, sin dependencias."""
+"""TechStore: servidor local y API compartida con el despliegue de Vercel."""
 import base64, hashlib, hmac, json, os, re, secrets, sqlite3, struct, time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, urlencode
 from urllib.request import Request, urlopen
 from pathlib import Path
 from contextlib import contextmanager
+import threading
+from storage import connect, ConfigurationError, is_integrity_error
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / 'techstore.db'
 KEY_FILE = ROOT / '.jwt-secret'
-if not KEY_FILE.exists(): KEY_FILE.write_text(secrets.token_hex(32))
-KEY = KEY_FILE.read_bytes()
-BASE = os.environ.get('BASE_URL', 'http://localhost:8000')
-@contextmanager
+KEY = os.getenv('JWT_SECRET', '').encode()
+if not KEY and not os.getenv('VERCEL'):
+    if not KEY_FILE.exists(): KEY_FILE.write_text(secrets.token_hex(32))
+    KEY = KEY_FILE.read_bytes()
+production_domain = os.getenv('VERCEL_PROJECT_PRODUCTION_URL') or os.getenv('VERCEL_URL')
+BASE = os.getenv('BASE_URL') or ('https://' + production_domain if os.getenv('VERCEL') and production_domain else 'http://localhost:8000')
+BASE = BASE.rstrip('/')
+_initialized = False
+_init_lock = threading.Lock()
+
 def connection():
-    c = sqlite3.connect(DB); c.row_factory = sqlite3.Row
-    try:
-        with c: yield c
-    finally: c.close()
+    return connect(DB)
+
+def ensure_initialized():
+    global _initialized
+    if os.getenv('VERCEL') and len(KEY) < 32:
+        raise ConfigurationError('Configura JWT_SECRET en Vercel con al menos 32 caracteres y vuelve a desplegar.')
+    if not _initialized:
+        with _init_lock:
+            if not _initialized:
+                init()
+                _initialized = True
+
 def init():
     with connection() as c:
+        if c.postgres:
+            # Serializa la creación inicial entre distintas instancias de Vercel.
+            c.execute('SELECT pg_advisory_xact_lock(845208)')
         c.executescript('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE,name TEXT,store TEXT,role TEXT,password TEXT,totp TEXT,failures INTEGER DEFAULT 0,locked REAL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS challenges(id TEXT PRIMARY KEY,user INTEGER,expires REAL,attempts INTEGER DEFAULT 0,enroll INTEGER);
+CREATE TABLE IF NOT EXISTS challenges(id TEXT PRIMARY KEY,"user" INTEGER,expires REAL,attempts INTEGER DEFAULT 0,enroll INTEGER);
 CREATE TABLE IF NOT EXISTS oauth_states(id TEXT PRIMARY KEY,provider TEXT,expires REAL);
 CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT,store TEXT,price REAL CHECK(price>=0),stock INTEGER CHECK(stock>=0));''')
         if not c.execute('SELECT 1 FROM products').fetchone():
@@ -30,7 +49,7 @@ CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT,store TEXT,
         email, password = os.getenv('ADMIN_EMAIL'), os.getenv('ADMIN_PASSWORD')
         if email and password:
             validate_password(password)
-            c.execute('INSERT OR IGNORE INTO users(email,name,store,role,password,totp) VALUES(?,?,?,?,?,?)',(email.lower(),'Administrador','Lima','admin',password_hash(password),new_totp()))
+            c.execute('INSERT INTO users(email,name,store,role,password,totp) VALUES(?,?,?,?,?,?) ON CONFLICT(email) DO NOTHING',(email.lower(),'Administrador','Lima','admin',password_hash(password),new_totp()))
 def b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
 def password_hash(p, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -46,13 +65,16 @@ def token(user):
     data={'sub':str(user['id']),'exp':int(time.time())+3600,'iss':'techstore','aud':'techstore-web'}
     body=b64(b'{"alg":"HS256","typ":"JWT"}')+'.'+b64(json.dumps(data).encode())
     return body+'.'+b64(hmac.new(KEY,body.encode(),hashlib.sha256).digest())
-def identity(auth):
+def identity(auth, database=None):
     try:
         body,sig=auth.removeprefix('Bearer ').rsplit('.',1)
         if not hmac.compare_digest(sig,b64(hmac.new(KEY,body.encode(),hashlib.sha256).digest())): raise ValueError()
         payload=json.loads(base64.urlsafe_b64decode(body.split('.')[1]+'=='))
         if payload['exp']<time.time() or payload['iss']!='techstore' or payload['aud']!='techstore-web': raise ValueError()
-        with connection() as c: user=c.execute('SELECT * FROM users WHERE id=?',(payload['sub'],)).fetchone()
+        if database is not None:
+            user=database.execute('SELECT * FROM users WHERE id=?',(int(payload['sub']),)).fetchone()
+        else:
+            with connection() as c: user=c.execute('SELECT * FROM users WHERE id=?',(int(payload['sub']),)).fetchone()
         if not user: raise ValueError()
         return user
     except Exception: raise PermissionError('Sesión inválida o vencida.')
@@ -62,7 +84,7 @@ def challenge(c,u):
     # La configuración se ofrece una sola vez tras credenciales válidas.
     # La marca persistente de enrolamiento está en el prefijo del secreto.
     setup=not u['totp'].startswith('ok:')
-    c.execute('DELETE FROM challenges WHERE user=?',(u['id'],))
+    c.execute('DELETE FROM challenges WHERE "user"=?',(u['id'],))
     c.execute('INSERT INTO challenges VALUES(?,?,?,0,?)',(cid,u['id'],time.time()+300,int(setup)))
     result={'challenge':cid,'requires_mfa':True}
     if setup:
@@ -81,15 +103,28 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self): self.handle_request()
     def do_DELETE(self): self.handle_request()
     def handle_request(self):
-        try: self.dispatch()
+        try:
+            path=urlparse(self.path).path
+            if path.startswith('/api/') or path.startswith(('/auth/google', '/auth/github')):
+                ensure_initialized()
+            self.dispatch()
+        except ConfigurationError as e: self.respond(503,{'error':str(e)})
         except PermissionError as e: self.respond(403,{'error':str(e)})
-        except (ValueError,KeyError,TypeError,sqlite3.IntegrityError) as e: self.respond(400,{'error':str(e) or 'Datos inválidos'})
-        except Exception: self.respond(500,{'error':'No se pudo completar la operación.'})
+        except (ValueError,KeyError,TypeError) as e: self.respond(400,{'error':str(e) or 'Datos inválidos'})
+        except Exception as e:
+            if is_integrity_error(e):
+                self.respond(400,{'error':'Este correo ya está registrado. Inicia sesión.' if urlparse(self.path).path=='/api/register' else 'Los datos no cumplen los requisitos del registro.'})
+            else:
+                # No devuelve credenciales, consultas SQL ni detalles de conexión.
+                self.respond(500,{'error':'No se pudo completar la operación. Revisa la conexión de la base de datos en Vercel.'})
     def dispatch(self):
         path=urlparse(self.path).path; method=self.command
         length=int(self.headers.get('Content-Length','0'))
         if length>16384: raise ValueError('Petición demasiado grande')
         data=json.loads(self.rfile.read(length)) if length else {}
+        if path=='/api/health' and method=='GET':
+            with connection() as c: c.execute('SELECT 1').fetchone()
+            return self.respond(200,{'status':'ok','storage':'postgresql' if os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL') else 'sqlite'})
         # Archivos estáticos explícitos y rutas del frontend.
         if method=='GET' and path in ('/styles.css','/app.js','/screens.js','/data.js','/favicon.svg'):
             kind={'.css':'text/css','.js':'text/javascript','.svg':'image/svg+xml'}
@@ -104,7 +139,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('INSERT INTO users(email,name,store,role,password,totp) VALUES(?,?,?,?,?,?)',(email,name,store,'employee',password_hash(data['password']),new_totp()))
                 return self.respond(201,{'message':'Registro completado. Inicia sesión y configura MFA.'})
             if path=='/api/login' and method=='POST':
-                u=c.execute('SELECT * FROM users WHERE email=?',(data['email'].strip().lower(),)).fetchone()
+                u=c.execute('SELECT * FROM users WHERE email=?',(data['email'].strip().lower(),),for_update=True).fetchone()
                 if u and u['locked']>time.time(): return self.respond(429,{'error':'Cuenta bloqueada durante 15 minutos.'})
                 good=u and u['password'] and hmac.compare_digest(u['password'],password_hash(data['password'],u['password'].split(':')[0]))
                 if not good:
@@ -115,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
                 c.execute('UPDATE users SET failures=0,locked=0 WHERE id=?',(u['id'],))
                 return self.respond(200,challenge(c,u))
             if path=='/api/mfa' and method=='POST':
-                ch=c.execute('SELECT * FROM challenges WHERE id=?',(data['challenge'],)).fetchone()
+                ch=c.execute('SELECT * FROM challenges WHERE id=?',(data['challenge'],),for_update=True).fetchone()
                 if not ch or ch['expires']<time.time() or ch['attempts']>=3: raise ValueError('Desafío vencido o bloqueado. Inicia sesión otra vez.')
                 u=c.execute('SELECT * FROM users WHERE id=?',(ch['user'],)).fetchone(); secret=u['totp'].removeprefix('ok:')
                 if not re.fullmatch(r'\d{6}',str(data['code'])) or not any(hmac.compare_digest(str(data['code']),totp(secret,time.time()+delta)) for delta in (-30,0,30)):
@@ -152,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 if u['locked']>time.time(): raise PermissionError('Cuenta bloqueada')
                 result=challenge(c,u); encoded=b64(json.dumps(result).encode())
                 self.send_response(302); self.send_header('Location','/#mfa='+encoded); self.end_headers(); return
-            u=identity(self.headers.get('Authorization',''))
+            u=identity(self.headers.get('Authorization',''),c)
             if path=='/api/me': return self.respond(200,public(u))
             if path=='/api/users':
                 if u['role']!='admin': raise PermissionError('Solo administrador')
