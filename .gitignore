@@ -1,0 +1,41 @@
+# Credenciales y configuración local
+.env
+.env.*
+!.env.example
+.jwt-secret
+*.pem
+*.key
+
+# Bases de datos y archivos auxiliares de SQLite
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+
+# Python: cachés, entornos virtuales y resultados de pruebas
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Configuración personal del editor y del sistema
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Archivos temporales, registros y paquetes generados
+*.log
+*.tmp
+*.bak
+*.zip
